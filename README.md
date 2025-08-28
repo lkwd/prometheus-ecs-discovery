@@ -29,6 +29,8 @@ The command line parameters that can be used are:
 * -config.filter-label (string): docker label (and optional value) to filter on "NAME_OF_LABEL[=VALUE]".
 * -config.port-label (string): Docker label to define the scrape port of the application
   (if missing an application won't be scraped) (default "PROMETHEUS_EXPORTER_PORT")
+* -config.drop-labels (string): Comma-separated string of labels to remove from the generated output.
+  (default "PROMETHEUS_EXPORTER_DROP_LABELS")
 
 ## Usage
 
@@ -66,6 +68,9 @@ scrape_configs:
     - regex: task_arn
       action: labeldrop
 ```
+
+Tip: You can use `-config.drop-labels` to remove the generated labels from the config
+and save having to post-hoc filter them out in `metric_relabel_configs`.
 
 To scrape the containers add following docker labels to them:
 
