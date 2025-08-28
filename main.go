@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -37,15 +38,15 @@ import (
 )
 
 type labels struct {
-	TaskArn       string `yaml:"task_arn"`
-	TaskName      string `yaml:"task_name"`
+	TaskArn       string `yaml:"task_arn,omitempty"`
+	TaskName      string `yaml:"task_name,omitempty"`
 	JobName       string `yaml:"job,omitempty"`
-	TaskRevision  string `yaml:"task_revision"`
-	TaskGroup     string `yaml:"task_group"`
-	ClusterArn    string `yaml:"cluster_arn"`
-	ContainerName string `yaml:"container_name"`
-	ContainerArn  string `yaml:"container_arn"`
-	DockerImage   string `yaml:"docker_image"`
+	TaskRevision  string `yaml:"task_revision,omitempty"`
+	TaskGroup     string `yaml:"task_group,omitempty"`
+	ClusterArn    string `yaml:"cluster_arn,omitempty"`
+	ContainerName string `yaml:"container_name,omitempty"`
+	ContainerArn  string `yaml:"container_arn,omitempty"`
+	DockerImage   string `yaml:"docker_image,omitempty"`
 	MetricsPath   string `yaml:"__metrics_path__,omitempty"`
 	Scheme        string `yaml:"__scheme__,omitempty"`
 }
@@ -60,11 +61,12 @@ var times = flag.Int("config.scrape-times", 0, "how many times to scrape before 
 var roleArn = flag.String("config.role-arn", "", "ARN of the role to assume when scraping the AWS API (optional)")
 var prometheusPortLabel = flag.String("config.port-label", "PROMETHEUS_EXPORTER_PORT", "Docker label to define the scrape port of the application (if missing an application won't be scraped)")
 var prometheusPathLabel = flag.String("config.path-label", "PROMETHEUS_EXPORTER_PATH", "Docker label to define the scrape path of the application")
-var prometheusSchemeLabel= flag.String("config.scheme-label", "PROMETHEUS_EXPORTER_SCHEME", "Docker label to define the scheme of the target application")
+var prometheusSchemeLabel = flag.String("config.scheme-label", "PROMETHEUS_EXPORTER_SCHEME", "Docker label to define the scheme of the target application")
 var prometheusFilterLabel = flag.String("config.filter-label", "", "Docker label (and optionally value) to require to scrape the application")
 var prometheusServerNameLabel = flag.String("config.server-name-label", "PROMETHEUS_EXPORTER_SERVER_NAME", "Docker label to define the server name")
 var prometheusJobNameLabel = flag.String("config.job-name-label", "PROMETHEUS_EXPORTER_JOB_NAME", "Docker label to define the job name")
 var prometheusDynamicPortDetection = flag.Bool("config.dynamic-port-detection", false, fmt.Sprintf("If true, only tasks with the Docker label %s=1 will be scraped", dynamicPortLabel))
+var prometheusDropLabels = flag.String("config.drop-labels", "PROMETHEUS_EXPORTER_DROP_LABELS", "Labels to drop from targets")
 
 // logError is a convenience function that decodes all possible ECS
 // errors and displays them to standard error.
@@ -131,25 +133,26 @@ type PrometheusTaskInfo struct {
 // container in the task has a PROMETHEUS_EXPORTER_PORT
 //
 // Example:
-//     ...
-//             "Name": "apache",
-//             "DockerLabels": {
-//                  "PROMETHEUS_EXPORTER_PORT": "1234"
-//              },
-//     ...
-//              "PortMappings": [
-//                {
-//                  "ContainerPort": 1883,
-//                  "HostPort": 0,
-//                  "Protocol": "tcp"
-//                },
-//                {
-//                  "ContainerPort": 1234,
-//                  "HostPort": 0,
-//                  "Protocol": "tcp"
-//                }
-//              ],
-//     ...
+//
+//	...
+//	        "Name": "apache",
+//	        "DockerLabels": {
+//	             "PROMETHEUS_EXPORTER_PORT": "1234"
+//	         },
+//	...
+//	         "PortMappings": [
+//	           {
+//	             "ContainerPort": 1883,
+//	             "HostPort": 0,
+//	             "Protocol": "tcp"
+//	           },
+//	           {
+//	             "ContainerPort": 1234,
+//	             "HostPort": 0,
+//	             "Protocol": "tcp"
+//	           }
+//	         ],
+//	...
 func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 	ret := []*PrometheusTaskInfo{}
 	var host string
@@ -180,6 +183,13 @@ func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 	var filter []string
 	if *prometheusFilterLabel != "" {
 		filter = strings.Split(*prometheusFilterLabel, "=")
+	}
+
+	droplabels := make(map[string]bool)
+	if *prometheusDropLabels != "" {
+		for _, v := range strings.Split(*prometheusDropLabels, ",") {
+			droplabels[v] = true
+		}
 	}
 
 	for _, i := range t.Containers {
@@ -290,6 +300,28 @@ func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 			DockerImage:   *d.Image,
 		}
 
+		// Starting to wonder if a simple `if` tree might be more sensible.
+		if len(droplabels) > 0 {
+			rvStruct := reflect.ValueOf(&labels).Elem()
+			rvVisibleFields := reflect.VisibleFields(reflect.TypeOf(labels))
+			for _, field := range rvVisibleFields {
+				// Assumes the yaml fieldname is the first chunk but I'm
+				// pretty sure that the `yaml` package also assumes this.
+				yamltags := strings.Split(field.Tag.Get("yaml"), ",")
+				if len(yamltags) > 0 && yamltags[0] != "" {
+					// Do we want to drop this particular label?
+					if _, ok := droplabels[yamltags[0]]; ok {
+						name := field.Name // lazy lookup to avoid allocations
+						rvField := rvStruct.FieldByName(name)
+						// Make sure we can actually set this field
+						if rvField.CanSet() && rvField.CanAddr() {
+							rvField.SetZero()
+						}
+					}
+				}
+			}
+		}
+
 		exporterPath, ok = d.DockerLabels[*prometheusPathLabel]
 		if ok {
 			labels.MetricsPath = exporterPath
@@ -297,7 +329,7 @@ func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 
 		scheme, ok = d.DockerLabels[*prometheusSchemeLabel]
 		if ok {
-		    labels.Scheme = scheme
+			labels.Scheme = scheme
 		}
 
 		ret = append(ret, &PrometheusTaskInfo{
