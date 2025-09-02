@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -38,20 +37,6 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/go-yaml/yaml"
 )
-
-type labels struct {
-	TaskArn       string `yaml:"task_arn,omitempty"`
-	TaskName      string `yaml:"task_name,omitempty"`
-	JobName       string `yaml:"job,omitempty"`
-	TaskRevision  string `yaml:"task_revision,omitempty"`
-	TaskGroup     string `yaml:"task_group,omitempty"`
-	ClusterArn    string `yaml:"cluster_arn,omitempty"`
-	ContainerName string `yaml:"container_name,omitempty"`
-	ContainerArn  string `yaml:"container_arn,omitempty"`
-	DockerImage   string `yaml:"docker_image,omitempty"`
-	MetricsPath   string `yaml:"__metrics_path__,omitempty"`
-	Scheme        string `yaml:"__scheme__,omitempty"`
-}
 
 // Docker label for enabling dynamic port detection
 const dynamicPortLabel = "PROMETHEUS_DYNAMIC_EXPORT"
@@ -125,8 +110,8 @@ type PrometheusContainer struct {
 // PrometheusTaskInfo is the final structure that will be
 // output as a Prometheus file service discovery config.
 type PrometheusTaskInfo struct {
-	Targets []string `yaml:"targets"`
-	Labels  labels   `yaml:"labels"`
+	Targets []string          `yaml:"targets"`
+	Mapped  map[string]string `yaml:"labels"`
 }
 
 // ExporterInformation returns a list of []*PrometheusTaskInfo
@@ -291,53 +276,44 @@ func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 			host = ip
 		}
 
-		labels := labels{
-			TaskArn:       *t.TaskArn,
-			TaskName:      *t.TaskDefinition.Family,
-			JobName:       d.DockerLabels[*prometheusJobNameLabel],
-			TaskRevision:  fmt.Sprintf("%d", t.TaskDefinition.Revision),
-			TaskGroup:     *t.Group,
-			ClusterArn:    *t.ClusterArn,
-			ContainerName: *i.Name,
-			ContainerArn:  *i.ContainerArn,
-			DockerImage:   *d.Image,
+		mapped := map[string]string{
+			"task_arn":       *t.TaskArn,
+			"task_name":      *t.TaskDefinition.Family,
+			"job":            d.DockerLabels[*prometheusJobNameLabel],
+			"task_revision":  fmt.Sprintf("%d", t.TaskDefinition.Revision),
+			"task_group":     *t.Group,
+			"cluster_arn":    *t.ClusterArn,
+			"container_name": *i.Name,
+			"container_arn":  *i.ContainerArn,
+			"docker_image":   *d.Image,
 		}
 
-		// Starting to wonder if a simple `if` tree might be more sensible.
-		if len(droplabels) > 0 {
-			rvStruct := reflect.ValueOf(&labels).Elem()
-			rvVisibleFields := reflect.VisibleFields(reflect.TypeOf(labels))
-			for _, field := range rvVisibleFields {
-				// Assumes the yaml fieldname is the first chunk but I'm
-				// pretty sure that the `yaml` package also assumes this.
-				yamltags := strings.Split(field.Tag.Get("yaml"), ",")
-				if len(yamltags) > 0 && yamltags[0] != "" {
-					// Do we want to drop this particular label?
-					if _, ok := droplabels[yamltags[0]]; ok {
-						name := field.Name // lazy lookup to avoid allocations
-						rvField := rvStruct.FieldByName(name)
-						// Make sure we can actually set this field
-						if rvField.CanSet() && rvField.CanAddr() {
-							rvField.SetZero()
-						}
-					}
-				}
+		// Crufty but we can't `omitempty` on the fields of a `map`.
+		for k, v := range mapped {
+			// Empty fields get removed
+			if v == "" {
+				delete(mapped, k)
+				continue
+			}
+			// Labels we're dropping get dropped, obviously
+			if _, ok := droplabels[k]; ok {
+				delete(mapped, k)
 			}
 		}
 
 		exporterPath, ok = d.DockerLabels[*prometheusPathLabel]
 		if ok {
-			labels.MetricsPath = exporterPath
+			mapped["__metrics_path__"] = exporterPath
 		}
 
 		scheme, ok = d.DockerLabels[*prometheusSchemeLabel]
 		if ok {
-			labels.Scheme = scheme
+			mapped["__scheme__"] = scheme
 		}
 
 		ret = append(ret, &PrometheusTaskInfo{
 			Targets: []string{fmt.Sprintf("%s:%d", host, hostPort)},
-			Labels:  labels,
+			Mapped:  mapped,
 		})
 	}
 	return ret
