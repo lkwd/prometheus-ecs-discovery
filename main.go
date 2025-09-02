@@ -26,6 +26,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -67,6 +69,7 @@ var prometheusServerNameLabel = flag.String("config.server-name-label", "PROMETH
 var prometheusJobNameLabel = flag.String("config.job-name-label", "PROMETHEUS_EXPORTER_JOB_NAME", "Docker label to define the job name")
 var prometheusDynamicPortDetection = flag.Bool("config.dynamic-port-detection", false, fmt.Sprintf("If true, only tasks with the Docker label %s=1 will be scraped", dynamicPortLabel))
 var prometheusDropLabels = flag.String("config.drop-labels", "PROMETHEUS_EXPORTER_DROP_LABELS", "Labels to drop from targets")
+var retries = flag.Int("config.aws-api-retries", 5, "how many retries to attempt to contact AWS API before giving up (default 5)")
 
 // logError is a convenience function that decodes all possible ECS
 // errors and displays them to standard error.
@@ -636,7 +639,13 @@ func GetAugmentedTasks(svc *ecs.Client, svcec2 *ec2.Client, clusterArns []*strin
 func main() {
 	flag.Parse()
 
-	config, err := config.LoadDefaultConfig(context.Background())
+	config, err := config.LoadDefaultConfig(context.Background(), config.WithRetryer(func() aws.Retryer {
+		return retry.NewStandard(func(o *retry.StandardOptions) {
+			o.MaxAttempts = *retries
+			o.MaxBackoff = 30
+		})
+	}))
+
 	if err != nil {
 		logError(err)
 		return
