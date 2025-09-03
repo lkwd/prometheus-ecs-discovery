@@ -36,7 +36,7 @@ import (
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
-	"github.com/go-yaml/yaml"
+	"github.com/goccy/go-yaml"
 )
 
 type labels struct {
